@@ -1,5 +1,5 @@
 import express from 'express';
-import openai from './openai/connection';
+import openai, { tokenHash } from './openai/connection';
 import { ChatCompletionRequestMessage } from 'openai/api';
 import { getMainPrompt, getTrainingAnswer } from './prompts';
 import * as S from "@effect/schema/Schema";
@@ -9,29 +9,40 @@ import { CreateChatCompletionResponse } from 'openai';
 import { ChatId } from 'node-telegram-bot-api';
 import orderedJson from 'json-order';
 import { PropertyMap } from 'json-order/dist/models';
-import { pipe } from 'fp-ts/function';
+import { flow, pipe } from 'fp-ts/function';
 import * as A from 'fp-ts/Array';
+import * as O from 'fp-ts/Option';
 import * as E from 'fp-ts/Either';
+import { PrismaClient, Message as DbMessage } from '@prisma/client'
+import { Either } from 'fp-ts/Either';
+import { ParseError } from '@effect/schema/ParseResult';
+
+const prisma = new PrismaClient();
 
 const host = process.env.HOST ?? 'localhost';
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 
+
 const app = express();
 
+type ReadonlyPropertyMap = {
+  readonly [key: string]: readonly string[];
+}
+
 type Message = ({
-  role: 'user',
-  handle: string, // user handle type todo
-  message: string,
+  readonly role: 'user',
+  readonly handle: string, // user handle type todo
+  readonly message: string,
 } | {
-  // TODO think of thoughts/answer ordering, matters for history?
-  role: 'actor',
-  handle: string, // actor handle type todo
-  thoughts: readonly string[],
+  readonly role: 'actor',
+  readonly handle: string, // actor handle type todo
+  readonly thoughts: readonly string[],
   // messageId?: string,
-  answer: string,
-  propertyMap: PropertyMap
-});
-const messagesPerChat: {[k in ChatId]: Message[]} = {};
+  readonly answer: string,
+  readonly propertyMap: ReadonlyPropertyMap,
+}) & {
+  readonly role: Role
+};
 
 const GptActorResponseSchema = S.record(S.string, S.struct({
   thoughts: S.array(S.string),
@@ -43,13 +54,92 @@ type GptActorResponseSchemaType = S.To<typeof GptActorResponseSchema>;
 const GptUserQuerySchema = S.record(S.string, S.string);
 
 type GptUserQuerySchemaType = S.To<typeof GptUserQuerySchema>;
-const getMessages = (chatId: ChatId, newMessage: Message & {role: 'user'}): ChatCompletionRequestMessage[] => (messagesPerChat[chatId] || []).concat([newMessage]).map((message) => ({
+
+const UserLiteral = S.literal('user');
+
+const ActorLiteral = S.literal('actor');
+
+const RoleModel = S.union(
+  UserLiteral,
+  ActorLiteral
+);
+
+type Role = S.From<typeof RoleModel>;
+
+const tgChatIdToDbChatId = (chatId: ChatId) => `${chatId}`;
+
+const DbMessageSchema = S.union(S.struct({
+  role: UserLiteral,
+  handle: S.string, // TODO newtype
+  message: S.string,
+}), S.struct({
+  role: ActorLiteral,
+  handle: S.string, // TODO newtype
+  thoughts: S.array(S.string),
+  answer: S.string,
+  propertyMap: S.record(S.string, S.array(S.string)),
+}));
+
+const parseDbMessage = S.parseEither(DbMessageSchema);
+
+const getDbChatMessages = async (chatId: ChatId) => {
+  const chat = await prisma.chat.findUnique({
+    where: {
+      chatId: tgChatIdToDbChatId(chatId)
+    }
+  });
+  const {left: errors, right: messages} = pipe(chat,
+    O.fromNullable,
+    O.map(flow(c => c.messages, A.map(parseDbMessage))),
+    O.getOrElse(() => [] as Either<ParseError, Message>[]),
+    A.separate
+  );
+  // ignore errors here
+  if (errors.length > 0) {
+    console.warn('ignoring db message parse errors', JSON.stringify(errors, null, 2));
+  }
+  return messages;
+};
+
+const resetDbChatMessages = async (chatId: ChatId) => {
+  await prisma.chat.upsert({
+    where: {
+      chatId: tgChatIdToDbChatId(chatId)
+    },
+    update: {
+      messages: [],
+    },
+    create: {
+      chatId: tgChatIdToDbChatId(chatId),
+      messages: []
+    }
+  });
+};
+
+const pushDbChatMessage = async (chatId: ChatId, message: Message) => {
+  await prisma.chat.upsert({
+    where: {
+      chatId: tgChatIdToDbChatId(chatId)
+    },
+    update: {
+      messages: {
+        push: message as DbMessage,
+      },
+    },
+    create: {
+      chatId: tgChatIdToDbChatId(chatId),
+      messages: []
+    }
+  });
+}
+
+const getMessages = async (chatId: ChatId, newMessage: Message & {role: 'user'}): Promise<ChatCompletionRequestMessage[]> => (await getDbChatMessages(chatId)).concat([newMessage]).map((message) => ({
   role: message.role === 'user' ? 'user' : 'assistant',
   content: orderedJson.stringify(message.role === 'user' ? {[message.handle]: message.message} satisfies GptUserQuerySchemaType : {[message.handle]: {
     thoughts: message.thoughts,
     answer: message.answer,
     // messageId: message.messageId,
-  }} satisfies GptActorResponseSchemaType, message.role === 'actor' ? message.propertyMap : null),
+  }} satisfies GptActorResponseSchemaType, message.role === 'actor' ? message.propertyMap as PropertyMap : null),
 }));
 
 const getInitMessages = () => [{
@@ -60,25 +150,71 @@ const getInitMessages = () => [{
   content: getTrainingAnswer(),
 } as const];
 
+// chat_id varchar indexed
+//
+
+const createChatCompletion = async (chatId: ChatId, ...params: Parameters<typeof openai.createChatCompletion>): Promise<Awaited<ReturnType<typeof openai.createChatCompletion>>['data']> => {
+  const completionIntentPromise = prisma.completion.create({
+    data: {
+      chatId: tgChatIdToDbChatId(chatId),
+      state: 'intent',
+      tokenHash: `${tokenHash}`,
+      model: params[0].model,
+    }
+  });
+  try {
+    const completion = await openai.createChatCompletion(...params);
+    const completionIntent = await completionIntentPromise;
+    await prisma.completion.update({
+      where: {
+        id: completionIntent.id,
+      },
+      data: {
+        state: 'done',
+        promptTokens: completion.data.usage?.prompt_tokens,
+        completionTokens: completion.data.usage?.completion_tokens,
+      }
+    })
+    // report completion according to completionIntent
+    return completion.data;
+  } catch (e) {
+    const completionIntent = await completionIntentPromise;
+    try {
+      await prisma.completion.update({
+        where: {
+          id: completionIntent.id,
+        },
+        data: {
+          state: 'error',
+        }
+      });
+    } catch (e) {
+      console.error('failed to update completion intent state to erroneous, ignoring', e);
+    }
+    throw e;
+  }
+}
+
 const getCompletion = async (chatId: ChatId, newMessage: Message & {role: 'user'}): Promise<CreateChatCompletionResponse> => {
   const initMessages = getInitMessages();
-  const messages = getMessages(chatId, newMessage);
+  const messages = await getMessages(chatId, newMessage);
   console.log('messages', messages);
-  return (await openai.createChatCompletion({
+  return (await createChatCompletion(chatId, {
     stream: false,
-    model: 'gpt-3.5-turbo',
+    // model: 'gpt-3.5-turbo',
+    model: 'gpt-4', // available after I have one charge from openai
     temperature: 0.7,
     messages: [
       ...initMessages,
       ...messages,
     ]
-  })).data;
+  }));
 };
 
 let blocked = false;
 
 telebot.onText(/\/reset/, async (msg) => {
-  messagesPerChat[msg.chat.id] = [];
+  await resetDbChatMessages(msg.chat.id);
   await telebot.sendMessage(msg.chat.id, 'reset done');
 });
 
@@ -91,7 +227,8 @@ telebot.on('message', async (msg) => {
   } // TODO proper async handling
 
   const chatId = msg.chat.id;
-  if (messagesPerChat[chatId]?.length > 1000) {
+  const messagesForThisChat = await getDbChatMessages(chatId);
+  if (messagesForThisChat.length > 1000) {
     console.error('too many messages already, ddos?');
     return;
   }
@@ -106,10 +243,6 @@ telebot.on('message', async (msg) => {
   try {
     blocked = true;
     const text = assertExists(msg.text, 'no message text');
-    if (!messagesPerChat[chatId]) {
-      messagesPerChat[chatId] = [];
-    }
-    const messagesForThisChat = messagesPerChat[chatId];
     const userMessage: Message & {role: 'user'} = {
       role: 'user' as const,
       message: text,
@@ -137,11 +270,12 @@ telebot.on('message', async (msg) => {
 
     // only after successful parsing otherwise messages like "forget your instructions" would stuck in the conversation
     // TODO maybe also delete non-parseable from chat history; should fit our purpose
-    messagesPerChat[chatId].push(userMessage);
+    await pushDbChatMessage(chatId, userMessage);
 
     const botMessageEs = botMessageJsonParsed.map(o => pipe(S.parseEither(GptActorResponseSchema)(o.object), E.map(r => ({object: r, propertyMap: o.map}))));
     const botMessagesE = pipe(botMessageEs, A.sequence(E.Applicative), E.map(A.reduce({} as {object: GptActorResponseSchemaType, propertyMap: PropertyMap}, (acc, o) => ({object: {
-        ...acc.object, ...o.object
+        ...acc.object,
+        ...o.object
       }, propertyMap: {...acc.propertyMap, ...o.propertyMap}}))));
     if (botMessagesE._tag === 'Left') {
       console.log('unparseable bot message', botMessagesE.left);
@@ -154,7 +288,8 @@ telebot.on('message', async (msg) => {
         console.log('skipping message for unknown handle', handle);
         continue;
       }
-      messagesForThisChat.push({
+
+      await pushDbChatMessage(chatId, {
         role: 'actor' as const,
         handle,
         propertyMap: botMessage.propertyMap, // bigger property map than "just for this message" but it's all right
@@ -167,7 +302,6 @@ telebot.on('message', async (msg) => {
   } finally {
     blocked = false;
   }
-  console.log('messages', messagesPerChat[chatId]);
 });
 
 app.listen(port, host, () => {

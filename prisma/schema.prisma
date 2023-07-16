@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model Chat {
+  id         String       @id @default(auto()) @map("_id") @db.ObjectId
+  chatId     String       @unique
+  messages   Message[]
+  Completion Completion[]
+}
+
+model Completion {
+  id               String          @id @default(auto()) @map("_id") @db.ObjectId
+  state            CompletionState
+  tokenHash        String
+  chat             Chat            @relation(fields: [chatId], references: [chatId])
+  chatId           String
+  promptTokens     Int?
+  completionTokens Int?
+  model            String
+}
+
+enum CompletionState {
+  intent
+  done
+  error
+}
+
+enum Role {
+  actor
+  user
+}
+
+// not enough; parse into ADT
+type Message {
+  role        Role
+  handle      String
+  message     String?
+  thoughts    String[]
+  answer      String?
+  propertyMap Json?
+}
