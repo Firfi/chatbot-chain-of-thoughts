@@ -3,7 +3,7 @@ import openai, { tokenHash } from './openai/connection';
 import { ChatCompletionRequestMessage } from 'openai/api';
 import { getMainPrompt, getTrainingAnswer } from './prompts';
 import * as S from "@effect/schema/Schema";
-import telebot from './telegram/connection';
+import * as telebot from './telegram/connection';
 import { assertExists } from './utils';
 import { CreateChatCompletionResponse } from 'openai';
 import { ChatId } from 'node-telegram-bot-api';
@@ -213,13 +213,13 @@ const getCompletion = async (chatId: ChatId, newMessage: Message & {role: 'user'
 
 let blocked = false;
 
-telebot.onText(/\/reset/, async (msg) => {
-  await resetDbChatMessages(msg.chat.id);
-  await telebot.sendMessage(msg.chat.id, 'reset done');
-});
+const handleReset = async (chatId: ChatId) => {
+  await resetDbChatMessages(chatId);
+  await telebot.sendMessage(chatId, 'admin', 'reset done');
+};
 
-telebot.on('message', async (msg) => {
-  if (msg.text === '/reset') return; // TODO wtf can we do better routing
+telebot.onMessage(async (msg) => {
+  if (msg.text === '/reset') return handleReset(msg.chat.id); // TODO wtf can we do better routing
   console.log('msg', msg);
   if (blocked) {
     console.log('skipping message, blocked');
@@ -295,8 +295,8 @@ telebot.on('message', async (msg) => {
         propertyMap: botMessage.propertyMap, // bigger property map than "just for this message" but it's all right
         ...message,
       });
-      await telebot.sendMessage(chatId, `${handle} thoughts: ${message.thoughts.join(',') || '[no thoughts]'}`);
-      await telebot.sendMessage(chatId, `${handle}: ${message.answer || '[no answer given]'}`);
+      await telebot.sendMessage(chatId, handle, `thoughts: ${message.thoughts.join(',') || '[no thoughts]'}`);
+      await telebot.sendMessage(chatId, handle, `${message.answer || '[no answer given]'}`);
     }
 
   } finally {
@@ -310,4 +310,25 @@ app.listen(port, host, () => {
 
 process.on('uncaughtException', (err) => {
   console.error('whoops! there was an error', err);
+});
+
+import { WebSocketServer } from 'ws';
+import { subscribeBotMessage } from './telegram/connection';
+
+const wss = new WebSocketServer({ port: 80 });
+
+wss.on('connection', function connection(ws) {
+  const cleanupSub = subscribeBotMessage((chatId, handle, message) => {
+    ws.send(JSON.stringify({chatId, handle, message}));
+  });
+  ws.on('error', console.error);
+
+  ws.on('message', function message(data) {
+    console.log('received: %s', data);
+  });
+
+  ws.on('close', () => {
+    cleanupSub();
+  });
+
 });
