@@ -252,6 +252,14 @@ telebot.onMessage(async (msg) => {
     const botMessageRaw = assertExists(completion.choices[0].message).content;
     console.log('botMessageRaw', botMessageRaw);
 
+    // syntax error restoration
+    const permuteFuzzyJson = (s: string) => [
+      `${s}`,
+      `{${s}}`,
+      `{${s}`,
+      `${s}}`,
+    ];
+
     const botMessageJsonParsed = (() => {
       try {
         return [orderedJson.parse(botMessageRaw)];
@@ -259,7 +267,16 @@ telebot.onMessage(async (msg) => {
         try {
           // gpt3.5 would sometimes return two objects separated by newline {} \n {}, just ignore all except first for now
           const strings = botMessageRaw.split('\n').filter(Boolean);
-          return strings.map(s => orderedJson.parse(s));
+          return strings.map(permuteFuzzyJson).map(ss => {
+            for (const s of ss) {
+              try {
+                return orderedJson.parse(s);
+              } catch (e) {
+                // ignore
+              }
+            }
+            throw new Error(`unparseable: ${ss[0]}`);
+          });
         } catch (e) {
           // not parseable at all, TODO set system message "stay in role" or something
           console.error('unparseable bot message', botMessageRaw);
@@ -318,9 +335,11 @@ import { subscribeBotMessage } from './telegram/connection';
 const wss = new WebSocketServer({ port: 80 });
 
 wss.on('connection', function connection(ws) {
+
   const cleanupSub = subscribeBotMessage((chatId, handle, message) => {
     ws.send(JSON.stringify({chatId, handle, message}));
   });
+
   ws.on('error', console.error);
 
   ws.on('message', function message(data) {
