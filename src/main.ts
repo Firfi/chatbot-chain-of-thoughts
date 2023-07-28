@@ -6,7 +6,7 @@ import * as S from "@effect/schema/Schema";
 import * as telebot from './telegram/connection';
 import { assertExists } from './utils';
 import { CreateChatCompletionResponse } from 'openai';
-import { ChatId } from 'node-telegram-bot-api';
+import TelegramBot, { ChatId } from 'node-telegram-bot-api';
 import orderedJson from 'json-order';
 import { PropertyMap } from 'json-order/dist/models';
 import { flow, pipe } from 'fp-ts/function';
@@ -218,21 +218,32 @@ const handleReset = async (chatId: ChatId) => {
   await telebot.sendMessage(chatId, 'admin', 'reset done');
 };
 
-telebot.onMessage(async (msg) => {
-  if (msg.text === '/reset') return handleReset(msg.chat.id); // TODO wtf can we do better routing
-  console.log('msg', msg);
+const reactTgMessage = async (msg: TelegramBot.Message) => reactMessage({
+  isBot: msg.from?.is_bot,
+  chatId: msg.chat.id,
+  text: msg.text,
+});
+
+const reactMessage = async (msg: {
+  isBot?: boolean,
+  chatId: ChatId,
+  text?: string,
+}) => {
+  const chatId = msg.chatId;
+  const isBot = msg.isBot;
+  if (msg.text?.startsWith('/reset')) return handleReset(chatId); // TODO wtf can we do better routing
   if (blocked) {
     console.log('skipping message, blocked');
     return;
   } // TODO proper async handling
 
-  const chatId = msg.chat.id;
+
   const messagesForThisChat = await getDbChatMessages(chatId);
   if (messagesForThisChat.length > 1000) {
     console.error('too many messages already, ddos?');
     return;
   }
-  if (msg.from?.is_bot) {
+  if (isBot) {
     console.log('skipping (own?) th bot message', msg.text);
     return;
   }
@@ -319,7 +330,9 @@ telebot.onMessage(async (msg) => {
   } finally {
     blocked = false;
   }
-});
+};
+
+telebot.onMessage(reactTgMessage);
 
 app.listen(port, host, () => {
   console.log(`[ ready ] http://${host}:${port}`);
@@ -334,6 +347,8 @@ import { subscribeBotMessage } from './telegram/connection';
 
 const wss = new WebSocketServer({ port: 80 });
 
+const CHAT_ID = assertExists(process.env.CHAT_ID);
+
 wss.on('connection', function connection(ws) {
 
   const cleanupSub = subscribeBotMessage((chatId, handle, message) => {
@@ -342,8 +357,12 @@ wss.on('connection', function connection(ws) {
 
   ws.on('error', console.error);
 
-  ws.on('message', function message(data) {
-    console.log('received: %s', data);
+  ws.on('message', async (data) => {
+    await telebot.sendMessage(CHAT_ID, 'Player', data.toString());
+    await reactMessage({
+      chatId: CHAT_ID,
+      text: data.toString(),
+    })
   });
 
   ws.on('close', () => {
