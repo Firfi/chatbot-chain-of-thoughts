@@ -350,7 +350,7 @@ process.on('uncaughtException', (err) => {
 import { WebSocketServer } from 'ws';
 import { subscribeBotMessage } from './telegram/connection';
 
-const wss = new WebSocketServer({ port: 80 });
+const wss = new WebSocketServer({ port });
 
 const CHAT_ID = assertExists(process.env.CHAT_ID);
 
