@@ -371,7 +371,7 @@ wss.on('connection', function connection(ws) {
   ws.on('error', console.error);
 
   ws.on('message', async (data) => {
-    const message = S.parse(IncomingAppMessage)(JSON.parse(data.toString()));
+    const message = S.parseSync(IncomingAppMessage)(JSON.parse(data.toString()));
     await telebot.sendMessage(CHAT_ID, message.handle, message.message);
     await reactMessage({
       chatId: CHAT_ID,
