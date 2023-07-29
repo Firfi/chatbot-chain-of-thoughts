@@ -12,7 +12,7 @@
   },
   "private": true,
   "dependencies": {
-    "@effect-ts/schema": "^0.17.2",
+    "@effect/schema": "^0.31.0",
     "@prisma/client": "^4.5.0",
     "axios": "^1.0.0",
     "express": "~4.18.1",
@@ -27,7 +27,6 @@
     "ws": "^8.13.0"
   },
   "devDependencies": {
-    "@effect/schema": "^0.20.1",
     "@nx-tools/nx-prisma": "^5.0.2",
     "@nx/esbuild": "16.3.2",
     "@nx/eslint-plugin": "16.3.2",
