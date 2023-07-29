@@ -3,9 +3,8 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "start": "nx serve",
-    "build": "nx build",
-    "test": "nx test"
+    "heroku-postbuild": "npx nx build chatroom-prototype",
+    "start": "node dist/chatroom-prototype/main.js"
   },
   "private": true,
   "dependencies": {
