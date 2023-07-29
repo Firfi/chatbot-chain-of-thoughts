@@ -215,7 +215,7 @@ let blocked = false;
 
 const handleReset = async (chatId: ChatId) => {
   await resetDbChatMessages(chatId);
-  await telebot.sendMessage(chatId, 'admin', 'reset done');
+  await telebot.sendMessage(chatId, 'admin', 'reset done', true);
 };
 
 const reactTgMessage = async (msg: TelegramBot.Message) => reactMessage({
@@ -323,8 +323,13 @@ const reactMessage = async (msg: {
         propertyMap: botMessage.propertyMap, // bigger property map than "just for this message" but it's all right
         ...message,
       });
-      await telebot.sendMessage(chatId, handle, `thoughts: ${message.thoughts.join(',') || '[no thoughts]'}`);
-      await telebot.sendMessage(chatId, handle, `${message.answer || '[no answer given]'}`);
+      await telebot.sendMessage(chatId, handle, `thoughts: ${message.thoughts.join(',') || '[no thoughts]'}`, true);
+      if (message.answer) {
+        await telebot.sendMessage(chatId, handle, message.answer);
+      } else {
+        await telebot.sendMessage(chatId, handle, '[no answer given]', true);
+      }
+
     }
 
   } finally {
@@ -349,19 +354,28 @@ const wss = new WebSocketServer({ port: 80 });
 
 const CHAT_ID = assertExists(process.env.CHAT_ID);
 
+const IncomingAppMessage = S.struct({
+  message: S.string,
+  handle: S.string
+});
+
+type IncomingAppMessage = S.From<typeof IncomingAppMessage>;
+
 wss.on('connection', function connection(ws) {
 
-  const cleanupSub = subscribeBotMessage((chatId, handle, message) => {
+  const cleanupSub = subscribeBotMessage((chatId, handle, message, isDebug) => {
+    if (isDebug) return;
     ws.send(JSON.stringify({chatId, handle, message}));
   });
 
   ws.on('error', console.error);
 
   ws.on('message', async (data) => {
-    await telebot.sendMessage(CHAT_ID, 'Player', data.toString());
+    const message = S.parse(IncomingAppMessage)(JSON.parse(data.toString()));
+    await telebot.sendMessage(CHAT_ID, message.handle, message.message);
     await reactMessage({
       chatId: CHAT_ID,
-      text: data.toString(),
+      text: message.message,
     })
   });
 

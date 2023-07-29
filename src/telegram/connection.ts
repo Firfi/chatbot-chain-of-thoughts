@@ -5,7 +5,7 @@ import { TELEGRAM_TOKEN } from '../env';
 const telebot = new Telebot(TELEGRAM_TOKEN, { polling: true });
 
 type BotMessageSubscriptionHandle = string;
-type BotMessageSubscriptionCallback = (chatId: ChatId, handle: string, message: string) => void;
+type BotMessageSubscriptionCallback = (chatId: ChatId, handle: string, message: string, isDebug?: boolean) => void;
 
 const botMessageSubscriptions = new Map<BotMessageSubscriptionHandle, BotMessageSubscriptionCallback>
 
@@ -18,8 +18,8 @@ export const subscribeBotMessage = (cb: BotMessageSubscriptionCallback) => {
 };
 
 // messages from the bots
-export const sendMessage = async (chatId: ChatId, handle: string, message: string) => {
-  botMessageSubscriptions.forEach((cb) => cb(chatId, handle, message));
+export const sendMessage = async (chatId: ChatId, handle: string, message: string, isDebug = false) => {
+  botMessageSubscriptions.forEach((cb) => cb(chatId, handle, message, isDebug));
   await telebot.sendMessage(chatId, `${handle}: ${message}`);
 };
 
